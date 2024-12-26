@@ -1,7 +1,3 @@
-/*
- * After we refactor classes to functional components, we can remove this eslint-disable
- */
-/* eslint-disable max-classes-per-file */
 import React, {
   Children,
   PureComponent,
@@ -12,6 +8,8 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useRef,
+  useState,
 } from 'react';
 import clsx from 'clsx';
 import { scalePoint, ScalePoint } from 'victory-vendor/d3-scale';
@@ -130,7 +128,7 @@ function TravellerLayer({
   onBlur: () => void;
 }) {
   const { y, x: xFromProps, travellerWidth, height, traveller, ariaLabel, data, startIndex, endIndex } = otherProps;
-  const x = Math.max(travellerX, xFromProps);
+  const x = Math.max(travellerX ?? 0, xFromProps);
   const travellerProps: TravellerProps = {
     ...filterProps(otherProps, false),
     x,
@@ -380,33 +378,19 @@ function Panorama({
   });
 }
 
-interface State {
-  isTravellerMoving?: boolean;
-  isTravellerFocused?: boolean;
-  isSlideMoving?: boolean;
-  startX?: number;
-  endX?: number;
-  slideMoveStartX?: number;
-  movingTravellerId?: BrushTravellerId;
-  isTextActive?: boolean;
-  brushMoveStartX?: number;
-
-  scale?: ScalePoint<number>;
-  scaleValues?: number[];
-
-  prevData?: any[];
-  prevWidth?: number;
-  prevX?: number;
-  prevTravellerWidth?: number;
-  prevUpdateId?: string | number;
-}
-
 type TravellerProps = {
   x: number;
   y: number;
   width: number;
   height: number;
   stroke?: SVGAttributes<SVGElement>['stroke'];
+};
+
+type CreateScaleReturn = {
+  startX?: number;
+  endX?: number;
+  scale?: ScalePoint<number> | null;
+  scaleValues?: number[];
 };
 
 const createScale = ({
@@ -423,7 +407,7 @@ const createScale = ({
   x?: number;
   width?: number;
   travellerWidth?: number;
-}) => {
+}): CreateScaleReturn => {
   if (!data || !data.length) {
     return {};
   }
@@ -435,10 +419,6 @@ const createScale = ({
   const scaleValues = scale.domain().map(entry => scale(entry));
 
   return {
-    isTextActive: false,
-    isSlideMoving: false,
-    isTravellerMoving: false,
-    isTravellerFocused: false,
     startX: scale(startIndex),
     endX: scale(endIndex),
     scale,
@@ -453,260 +433,216 @@ type MouseOrTouchEvent = React.MouseEvent<SVGGElement> | TouchEvent<SVGGElement>
 
 type BrushWithStateProps = Props & PropertiesFromContext;
 
-class BrushWithState extends PureComponent<BrushWithStateProps, State> {
-  constructor(props: BrushWithStateProps) {
-    super(props);
+const RedoBrush = (props: BrushWithStateProps): React.ReactElement | null => {
+  const { x, width, travellerWidth, onChange, gap, data, startIndex, endIndex } = props;
+  const [isTravellerMoving, setIsTravellerMoving] = useState<boolean>(false);
+  const [isTravellerFocused, setIsTravellerFocused] = useState<boolean>(false);
+  const [isSlideMoving, setIsSlideMoving] = useState<boolean>(false);
+  const [isTextActive, setIsTextActive] = useState<boolean>(false);
+  const [movingTravellerId, setMovingTravellerId] = useState<BrushTravellerId | undefined>(undefined);
+  const [brushMoveStartX, setBrushMoveStartX] = useState<number | undefined>(undefined);
 
-    this.travellerDragStartHandlers = {
-      startX: this.handleTravellerDragStart.bind(this, 'startX'),
-      endX: this.handleTravellerDragStart.bind(this, 'endX'),
-    };
+  const [travellerPositions, setTravellerPositions] = useState<Record<BrushTravellerId, number>>(undefined);
+  const { startX, endX } = travellerPositions ?? {};
+  const [slideMoveStartX, setSlideMoveStartX] = useState<number | undefined>(undefined);
 
-    this.state = {};
+  const leaveTimerRef = useRef(null);
+
+  // scaleValues are a list of coordinates. For example: [65, 250, 435, 620, 805, 990].
+  const { scale, scaleValues } =
+    data && data.length ? createScale({ data, width, x, travellerWidth, startIndex, endIndex }) : { scale: null };
+
+  if (scale && !travellerPositions) {
+    setTravellerPositions({ startX: scale(startIndex), endX: scale(endIndex) });
   }
 
-  leaveTimer?: number;
+  const handleTravellerMove = useCallback(
+    (e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) => {
+      const prevValue = travellerPositions[movingTravellerId];
+      // console.log('prev', prevValue, movingTravellerId, travellerPositions);
 
-  travellerDragStartHandlers?: Record<BrushTravellerId, (event: MouseOrTouchEvent) => void>;
-
-  static getDerivedStateFromProps(nextProps: BrushWithStateProps, prevState: State): State {
-    const { data, width, x, travellerWidth, updateId, startIndex, endIndex } = nextProps;
-
-    if (data !== prevState.prevData || updateId !== prevState.prevUpdateId) {
-      return {
-        prevData: data,
-        prevTravellerWidth: travellerWidth,
-        prevUpdateId: updateId,
-        prevX: x,
-        prevWidth: width,
-        ...(data && data.length
-          ? createScale({ data, width, x, travellerWidth, startIndex, endIndex })
-          : { scale: null, scaleValues: null }),
-      };
-    }
-    if (
-      prevState.scale &&
-      (width !== prevState.prevWidth || x !== prevState.prevX || travellerWidth !== prevState.prevTravellerWidth)
-    ) {
-      prevState.scale.range([x, x + width - travellerWidth]);
-
-      const scaleValues = prevState.scale.domain().map(entry => prevState.scale(entry));
-
-      return {
-        prevData: data,
-        prevTravellerWidth: travellerWidth,
-        prevUpdateId: updateId,
-        prevX: x,
-        prevWidth: width,
-        startX: prevState.scale(nextProps.startIndex),
-        endX: prevState.scale(nextProps.endIndex),
+      const params: { data: any[]; gap: number; scaleValues: number[]; startX?: number; endX?: number } = {
+        data,
+        gap,
         scaleValues,
       };
-    }
 
-    if (
-      prevState.scale &&
-      !prevState.isSlideMoving &&
-      !prevState.isTravellerMoving &&
-      !prevState.isTravellerFocused &&
-      !prevState.isTextActive
-    ) {
-      /*
-       * If the startIndex and endIndex are controlled from the outside,
-       * we need to keep the startX and end up to date.
-       * Also we do not want to do that while user is interacting in the brush,
-       * because this will trigger re-render and interrupt the drag&drop.
-       */
-      return {
-        startX: prevState.scale(nextProps.startIndex),
-        endX: prevState.scale(nextProps.endIndex),
-      };
-    }
-
-    return null;
-  }
-
-  componentWillUnmount() {
-    if (this.leaveTimer) {
-      clearTimeout(this.leaveTimer);
-      this.leaveTimer = null;
-    }
-
-    this.detachDragEndListener();
-  }
-
-  handleDrag = (e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) => {
-    if (this.leaveTimer) {
-      clearTimeout(this.leaveTimer);
-      this.leaveTimer = null;
-    }
-
-    if (this.state.isTravellerMoving) {
-      this.handleTravellerMove(e);
-    } else if (this.state.isSlideMoving) {
-      this.handleSlideDrag(e);
-    }
-  };
-
-  handleTouchMove = (e: TouchEvent<SVGGElement>) => {
-    if (e.changedTouches != null && e.changedTouches.length > 0) {
-      this.handleDrag(e.changedTouches[0]);
-    }
-  };
-
-  attachDragEndListener() {
-    window.addEventListener('mouseup', this.handleDragEnd, true);
-    window.addEventListener('touchend', this.handleDragEnd, true);
-    window.addEventListener('mousemove', this.handleDrag, true);
-  }
-
-  detachDragEndListener() {
-    window.removeEventListener('mouseup', this.handleDragEnd, true);
-    window.removeEventListener('touchend', this.handleDragEnd, true);
-    window.removeEventListener('mousemove', this.handleDrag, true);
-  }
-
-  handleDragEnd = () => {
-    this.setState(
-      {
-        isTravellerMoving: false,
-        isSlideMoving: false,
-      },
-      () => {
-        const { endIndex, onDragEnd, startIndex } = this.props;
-        onDragEnd?.({
-          endIndex,
-          startIndex,
-        });
-      },
-    );
-    this.detachDragEndListener();
-  };
-
-  handleLeaveWrapper = () => {
-    if (this.state.isTravellerMoving || this.state.isSlideMoving) {
-      this.leaveTimer = window.setTimeout(this.handleDragEnd, this.props.leaveTimeOut);
-    }
-  };
-
-  handleEnterSlideOrTraveller = () => {
-    this.setState({
-      isTextActive: true,
-    });
-  };
-
-  handleLeaveSlideOrTraveller = () => {
-    this.setState({
-      isTextActive: false,
-    });
-  };
-
-  handleSlideDragStart = (e: MouseOrTouchEvent) => {
-    const event = isTouch(e) ? e.changedTouches[0] : e;
-
-    this.setState({
-      isTravellerMoving: false,
-      isSlideMoving: true,
-      slideMoveStartX: event.pageX,
-    });
-
-    this.attachDragEndListener();
-  };
-
-  handleSlideDrag(e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) {
-    const { slideMoveStartX, startX, endX, scaleValues } = this.state;
-    const { x, width, travellerWidth, startIndex, endIndex, onChange, data, gap } = this.props;
-    let delta = e.pageX - slideMoveStartX;
-
-    if (delta > 0) {
-      delta = Math.min(delta, x + width - travellerWidth - endX, x + width - travellerWidth - startX);
-    } else if (delta < 0) {
-      delta = Math.max(delta, x - startX, x - endX);
-    }
-    const newIndex = getIndex({
-      startX: startX + delta,
-      endX: endX + delta,
-      data,
-      gap,
-      scaleValues,
-    });
-
-    if ((newIndex.startIndex !== startIndex || newIndex.endIndex !== endIndex) && onChange) {
-      onChange(newIndex);
-    }
-
-    this.setState({
-      startX: startX + delta,
-      endX: endX + delta,
-      slideMoveStartX: e.pageX,
-    });
-  }
-
-  handleTravellerDragStart(id: BrushTravellerId, e: MouseOrTouchEvent) {
-    const event = isTouch(e) ? e.changedTouches[0] : e;
-
-    this.setState({
-      isSlideMoving: false,
-      isTravellerMoving: true,
-      movingTravellerId: id,
-      brushMoveStartX: event.pageX,
-    });
-
-    this.attachDragEndListener();
-  }
-
-  handleTravellerMove(e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) {
-    const { brushMoveStartX, movingTravellerId, endX, startX, scaleValues } = this.state;
-    const prevValue = this.state[movingTravellerId];
-
-    const { x, width, travellerWidth, onChange, gap, data } = this.props;
-    const params = { startX: this.state.startX, endX: this.state.endX, data, gap, scaleValues };
-
-    let delta = e.pageX - brushMoveStartX;
-    if (delta > 0) {
-      delta = Math.min(delta, x + width - travellerWidth - prevValue);
-    } else if (delta < 0) {
-      delta = Math.max(delta, x - prevValue);
-    }
-
-    params[movingTravellerId] = prevValue + delta;
-
-    const newIndex = getIndex(params);
-    const { startIndex, endIndex } = newIndex;
-    const isFullGap = () => {
-      const lastIndex = data.length - 1;
-      if (
-        (movingTravellerId === 'startX' && (endX > startX ? startIndex % gap === 0 : endIndex % gap === 0)) ||
-        (endX < startX && endIndex === lastIndex) ||
-        (movingTravellerId === 'endX' && (endX > startX ? endIndex % gap === 0 : startIndex % gap === 0)) ||
-        (endX > startX && endIndex === lastIndex)
-      ) {
-        return true;
+      let delta = e.pageX - brushMoveStartX;
+      if (delta > 0) {
+        delta = Math.min(delta, x + width - travellerWidth - prevValue);
+      } else if (delta < 0) {
+        delta = Math.max(delta, x - prevValue);
       }
-      return false;
+
+      params[movingTravellerId] = prevValue + delta;
+
+      const newIndex = getIndex({ ...params, startX, endX });
+      const { startIndex: newStart, endIndex: newEnd } = newIndex;
+      const isFullGap = () => {
+        const lastIndex = data.length - 1;
+        if (
+          (movingTravellerId === 'startX' && (endX > startX ? newStart % gap === 0 : newEnd % gap === 0)) ||
+          (endX < startX && newEnd === lastIndex) ||
+          (movingTravellerId === 'endX' && (endX > startX ? newEnd % gap === 0 : newStart % gap === 0)) ||
+          (endX > startX && newEnd === lastIndex)
+        ) {
+          return true;
+        }
+        return false;
+      };
+
+      setTravellerPositions(prev => ({ ...prev, [movingTravellerId]: prev[movingTravellerId] + delta }));
+      setBrushMoveStartX(e.pageX);
+      if (onChange) {
+        if (isFullGap()) {
+          onChange(newIndex);
+        }
+      }
+    },
+    [
+      brushMoveStartX,
+      data,
+      endX,
+      gap,
+      movingTravellerId,
+      onChange,
+      scaleValues,
+      startX,
+      travellerPositions,
+      travellerWidth,
+      width,
+      x,
+    ],
+  );
+
+  const handleSlideDrag = useCallback(
+    (e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) => {
+      let delta = e.pageX - slideMoveStartX;
+
+      if (delta > 0) {
+        delta = Math.min(delta, x + width - travellerWidth - endX, x + width - travellerWidth - startX);
+      } else if (delta < 0) {
+        delta = Math.max(delta, x - startX, x - endX);
+      }
+      const newIndex = getIndex({
+        startX: startX + delta,
+        endX: endX + delta,
+        data,
+        gap,
+        scaleValues,
+      });
+
+      if ((newIndex.startIndex !== startIndex || newIndex.endIndex !== endIndex) && onChange) {
+        onChange(newIndex);
+      }
+
+      setTravellerPositions(prev => ({ startX: prev.startX + delta, endX: prev.endX + delta }));
+      setSlideMoveStartX(e.pageX);
+    },
+    [data, endIndex, endX, gap, onChange, scaleValues, slideMoveStartX, startIndex, startX, travellerWidth, width, x],
+  );
+
+  const handleDrag = useCallback(
+    (e: React.Touch | React.MouseEvent<SVGGElement> | MouseEvent) => {
+      if (leaveTimerRef.current) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+
+      if (isTravellerMoving) {
+        handleTravellerMove(e);
+      } else if (isSlideMoving) {
+        handleSlideDrag(e);
+      }
+    },
+    [handleSlideDrag, handleTravellerMove, isSlideMoving, isTravellerMoving],
+  );
+
+  const handleDragEnd = useCallback(() => {
+    setIsTravellerMoving(false);
+    setIsSlideMoving(false);
+    const { onDragEnd } = props;
+    onDragEnd?.({
+      endIndex,
+      startIndex,
+    });
+
+    window.removeEventListener('mouseup', this, true);
+    window.removeEventListener('touchend', this, true);
+    window.removeEventListener('mousemove', handleDrag, true);
+  }, [endIndex, handleDrag, props, startIndex]);
+
+  const handleTouchMove = (e: TouchEvent<SVGGElement>) => {
+    if (e.changedTouches != null && e.changedTouches.length > 0) {
+      handleDrag(e.changedTouches[0]);
+    }
+  };
+
+  const handleEnterSlideOrTraveller = () => {
+    setIsTextActive(true);
+  };
+
+  const handleLeaveSlideOrTraveller = () => {
+    setIsTextActive(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      console.log('leave timer', leaveTimerRef.current);
+      if (leaveTimerRef.current) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+
+      window.removeEventListener('mouseup', handleDragEnd, true);
+      window.removeEventListener('touchend', handleDragEnd, true);
+      window.removeEventListener('mousemove', handleDrag, true);
+    };
+  }, [handleDrag, handleDragEnd]);
+
+  const handleLeaveWrapper = () => {
+    if (isTravellerMoving || isSlideMoving) {
+      leaveTimerRef.current = window.setTimeout(handleDragEnd, props.leaveTimeOut);
+      console.log('leaving', isTravellerMoving, isSlideMoving);
+    }
+  };
+
+  const handleTravellerDragStart = (id: BrushTravellerId, e: MouseOrTouchEvent) => {
+    const event = isTouch(e) ? e.changedTouches[0] : e;
+
+    setIsSlideMoving(false);
+    setIsTravellerMoving(true);
+    setMovingTravellerId(id);
+    setBrushMoveStartX(event.pageX);
+  };
+
+  useEffect(() => {
+    const attachDragEndListener = () => {
+      window.addEventListener('mouseup', handleDragEnd, true);
+      window.addEventListener('touchend', handleDragEnd, true);
+      window.addEventListener('mousemove', handleDrag, true);
     };
 
-    this.setState(
-      {
-        [movingTravellerId]: prevValue + delta,
-        brushMoveStartX: e.pageX,
-      },
-      () => {
-        if (onChange) {
-          if (isFullGap()) {
-            onChange(newIndex);
-          }
-        }
-      },
-    );
-  }
+    if (isSlideMoving || isTravellerMoving) attachDragEndListener();
 
-  handleTravellerMoveKeyboard = (direction: 1 | -1, id: BrushTravellerId) => {
-    const { data, gap } = this.props;
-    // scaleValues are a list of coordinates. For example: [65, 250, 435, 620, 805, 990].
-    const { scaleValues, startX, endX } = this.state;
+    return () => {
+      window.removeEventListener('mouseup', handleDragEnd, true);
+      window.removeEventListener('touchend', handleDragEnd, true);
+      window.removeEventListener('mousemove', handleDrag, true);
+    };
+  }, [handleDrag, handleDragEnd, isSlideMoving, isTravellerMoving]);
+
+  const handleSlideDragStart = (e: MouseOrTouchEvent) => {
+    const event = isTouch(e) ? e.changedTouches[0] : e;
+
+    setIsTravellerMoving(false);
+    setIsSlideMoving(true);
+    setSlideMoveStartX(event.pageX);
+  };
+
+  const handleTravellerMoveKeyboard = (direction: 1 | -1, id: BrushTravellerId) => {
     // currentScaleValue refers to which coordinate the current traveller should be placed at.
-    const currentScaleValue = this.state[id];
+    const currentScaleValue = travellerPositions[id];
 
     const currentIndex = scaleValues.indexOf(currentScaleValue);
     if (currentIndex === -1) {
@@ -725,137 +661,113 @@ class BrushWithState extends PureComponent<BrushWithStateProps, State> {
       return;
     }
 
-    this.setState(
-      {
-        [id]: newScaleValue,
-      },
-      () => {
-        this.props.onChange(
-          getIndex({
-            startX: this.state.startX,
-            endX: this.state.endX,
-            data,
-            gap,
-            scaleValues,
-          }),
-        );
-      },
+    setTravellerPositions(prev => ({
+      ...prev,
+      [id]: newScaleValue,
+    }));
+
+    onChange(
+      getIndex({
+        startX,
+        endX,
+        data,
+        gap,
+        scaleValues,
+      }),
     );
   };
 
-  render() {
-    const {
-      data,
-      className,
-      children,
-      x,
-      y,
-      width,
-      height,
-      alwaysShowText,
-      fill,
-      stroke,
-      startIndex,
-      endIndex,
-      travellerWidth,
-      tickFormatter,
-      dataKey,
-      padding,
-    } = this.props;
-    const { startX, endX, isTextActive, isSlideMoving, isTravellerMoving, isTravellerFocused } = this.state;
+  const { height, y } = props;
 
-    if (
-      !data ||
-      !data.length ||
-      !isNumber(x) ||
-      !isNumber(y) ||
-      !isNumber(width) ||
-      !isNumber(height) ||
-      width <= 0 ||
-      height <= 0
-    ) {
-      return null;
-    }
+  if (
+    !data ||
+    !data.length ||
+    !isNumber(x) ||
+    !isNumber(y) ||
+    !isNumber(width) ||
+    !isNumber(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return null;
+  }
 
-    const layerClass = clsx('recharts-brush', className);
-    const style = generatePrefixStyle('userSelect', 'none');
+  const { className, alwaysShowText, fill, stroke, children, padding, tickFormatter, dataKey } = props;
 
-    return (
-      <Layer
-        className={layerClass}
-        onMouseLeave={this.handleLeaveWrapper}
-        onTouchMove={this.handleTouchMove}
-        style={style}
-      >
-        <Background x={x} y={y} width={width} height={height} fill={fill} stroke={stroke} />
-        <PanoramaContextProvider>
-          <Panorama x={x} y={y} width={width} height={height} data={data} padding={padding}>
-            {children}
-          </Panorama>
-        </PanoramaContextProvider>
-        <Slide
+  const layerClass = clsx('recharts-brush', className);
+  const style = generatePrefixStyle('userSelect', 'none');
+  console.log(leaveTimerRef);
+
+  return (
+    <Layer className={layerClass} onMouseLeave={handleLeaveWrapper} onTouchMove={handleTouchMove} style={style}>
+      <Background x={x} y={y} width={width} height={height} fill={fill} stroke={stroke} />
+      <PanoramaContextProvider>
+        <Panorama x={x} y={y} width={width} height={height} data={data} padding={padding}>
+          {children}
+        </Panorama>
+      </PanoramaContextProvider>
+      <Slide
+        y={y}
+        height={height}
+        stroke={stroke}
+        travellerWidth={travellerWidth}
+        startX={startX}
+        endX={endX}
+        onMouseEnter={handleEnterSlideOrTraveller}
+        onMouseLeave={handleLeaveSlideOrTraveller}
+        onMouseDown={handleSlideDragStart}
+        onTouchStart={handleSlideDragStart}
+      />
+      <TravellerLayer
+        travellerX={startX}
+        id="startX"
+        otherProps={props}
+        onMouseEnter={handleEnterSlideOrTraveller}
+        onMouseLeave={handleLeaveSlideOrTraveller}
+        onMouseDown={e => handleTravellerDragStart('startX', e)}
+        onTouchStart={e => handleTravellerDragStart('startX', e)}
+        onTravellerMoveKeyboard={handleTravellerMoveKeyboard}
+        onFocus={() => {
+          setIsTravellerFocused(true);
+        }}
+        onBlur={() => {
+          setIsTravellerFocused(false);
+        }}
+      />
+      <TravellerLayer
+        travellerX={endX}
+        id="endX"
+        otherProps={props}
+        onMouseEnter={handleEnterSlideOrTraveller}
+        onMouseLeave={handleLeaveSlideOrTraveller}
+        onMouseDown={e => handleTravellerDragStart('endX', e)}
+        onTouchStart={e => handleTravellerDragStart('endX', e)}
+        onTravellerMoveKeyboard={handleTravellerMoveKeyboard}
+        onFocus={() => {
+          setIsTravellerFocused(true);
+        }}
+        onBlur={() => {
+          setIsTravellerFocused(false);
+        }}
+      />
+      {(isTextActive || isSlideMoving || isTravellerMoving || isTravellerFocused || alwaysShowText) && (
+        <BrushText
+          startIndex={startIndex}
+          endIndex={endIndex}
           y={y}
           height={height}
-          stroke={stroke}
           travellerWidth={travellerWidth}
+          stroke={stroke}
+          tickFormatter={tickFormatter}
+          dataKey={dataKey}
+          data={data}
           startX={startX}
           endX={endX}
-          onMouseEnter={this.handleEnterSlideOrTraveller}
-          onMouseLeave={this.handleLeaveSlideOrTraveller}
-          onMouseDown={this.handleSlideDragStart}
-          onTouchStart={this.handleSlideDragStart}
         />
-        <TravellerLayer
-          travellerX={startX}
-          id="startX"
-          otherProps={this.props}
-          onMouseEnter={this.handleEnterSlideOrTraveller}
-          onMouseLeave={this.handleLeaveSlideOrTraveller}
-          onMouseDown={this.travellerDragStartHandlers.startX}
-          onTouchStart={this.travellerDragStartHandlers.startX}
-          onTravellerMoveKeyboard={this.handleTravellerMoveKeyboard}
-          onFocus={() => {
-            this.setState({ isTravellerFocused: true });
-          }}
-          onBlur={() => {
-            this.setState({ isTravellerFocused: false });
-          }}
-        />
-        <TravellerLayer
-          travellerX={endX}
-          id="endX"
-          otherProps={this.props}
-          onMouseEnter={this.handleEnterSlideOrTraveller}
-          onMouseLeave={this.handleLeaveSlideOrTraveller}
-          onMouseDown={this.travellerDragStartHandlers.endX}
-          onTouchStart={this.travellerDragStartHandlers.endX}
-          onTravellerMoveKeyboard={this.handleTravellerMoveKeyboard}
-          onFocus={() => {
-            this.setState({ isTravellerFocused: true });
-          }}
-          onBlur={() => {
-            this.setState({ isTravellerFocused: false });
-          }}
-        />
-        {(isTextActive || isSlideMoving || isTravellerMoving || isTravellerFocused || alwaysShowText) && (
-          <BrushText
-            startIndex={startIndex}
-            endIndex={endIndex}
-            y={y}
-            height={height}
-            travellerWidth={travellerWidth}
-            stroke={stroke}
-            tickFormatter={tickFormatter}
-            dataKey={dataKey}
-            data={data}
-            startX={startX}
-            endX={endX}
-          />
-        )}
-      </Layer>
-    );
-  }
-}
+      )}
+    </Layer>
+  );
+};
 
 function BrushInternal(props: Props) {
   const dispatch = useAppDispatch();
@@ -896,7 +808,7 @@ function BrushInternal(props: Props) {
     onChange,
   };
   const { ref, ...allOtherProps } = props;
-  return <BrushWithState {...allOtherProps} {...contextProperties} />;
+  return <RedoBrush {...allOtherProps} {...contextProperties} />;
 }
 
 function BrushSettingsDispatcher(props: BrushSettings): null {
@@ -910,7 +822,7 @@ function BrushSettingsDispatcher(props: BrushSettings): null {
   return null;
 }
 
-export class Brush extends PureComponent<Props, State> {
+export class Brush extends PureComponent<Props> {
   static displayName = 'Brush';
 
   static defaultProps = {
